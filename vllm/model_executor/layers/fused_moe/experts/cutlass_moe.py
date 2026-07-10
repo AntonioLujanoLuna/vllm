@@ -206,7 +206,13 @@ def run_cutlass_moe_fp8(
         # swap_ab is a CUTLASS grouped-GEMM optimization (M <= 64 reduces padding).
         swap_ab = a1q.size(0) <= 64
         ops.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
-            expert_first_token_offset, problem_sizes1, problem_sizes2, N, K, swap_ab
+            expert_first_token_offset,
+            problem_sizes1,
+            problem_sizes2,
+            N,
+            K,
+            swap_ab,
+            True,
         )
         expert_offsets = expert_first_token_offset[:-1]
 
@@ -1142,6 +1148,7 @@ def run_cutlass_moe_w4a8_fp8(
     device = a1q.device
     _, K, N_packed = w2.shape
     N = N_packed * 8  # logical N, pack 8 int4 into 1 int32
+    first_n = 2 * N if activation.is_gated else N
 
     assert per_act_token, "W4A8 must use per-token scales"
     assert per_out_ch, "W4A8 must use per-channel scales"
@@ -1169,7 +1176,7 @@ def run_cutlass_moe_w4a8_fp8(
 
     topk = topk_ids.size(1)
     a1q_perm = _resize_cache(workspace2.view(dtype=torch.float8_e4m3fn), (M * topk, K))
-    mm1_out = _resize_cache(workspace13, (M * topk, N * 2))
+    mm1_out = _resize_cache(workspace13, (M * topk, first_n))
     act_out = _resize_cache(workspace2, (M * topk, N))
     # original workspace are based on input hidden_states dtype (bf16)
     quant_out = _resize_cache(
@@ -1194,7 +1201,13 @@ def run_cutlass_moe_w4a8_fp8(
     )
     # for RS gemm SwapAB is always enabled (swap logical M, N in the problem shape).
     ops.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
-        expert_first_token_offset, problem_sizes1, problem_sizes2, N, K, True
+        expert_first_token_offset,
+        problem_sizes1,
+        problem_sizes2,
+        N,
+        K,
+        True,
+        activation.is_gated,
     )
     expert_offsets = expert_first_token_offset[:-1]
 
@@ -1268,7 +1281,8 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         a_strides1_c_strides2 = torch.full((e,), k, device=device, dtype=torch.int64)
         self.a_strides1 = a_strides1_c_strides2
         self.a_strides2 = torch.full((e,), n, device=device, dtype=torch.int64)
-        self.c_strides1 = torch.full((e,), 2 * n, device=device, dtype=torch.int64)
+        first_n = 2 * n if moe_config.activation.is_gated else n
+        self.c_strides1 = torch.full((e,), first_n, device=device, dtype=torch.int64)
         self.c_strides2 = a_strides1_c_strides2
 
         self.b_strides1 = b_strides1
@@ -1276,7 +1290,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
 
         # sizeof(StrideS) = 16 bytes, encoded as 2xint64.
         self.s_strides1 = torch.zeros((e, 2), device=device, dtype=torch.int64)
-        self.s_strides1[:, 0] = 2 * n
+        self.s_strides1[:, 0] = first_n
         self.s_strides2 = torch.zeros((e, 2), device=device, dtype=torch.int64)
         self.s_strides2[:, 0] = k
 
@@ -1315,7 +1329,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -1330,6 +1344,10 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SILU_NO_MUL,
+            MoEActivation.GELU_NO_MUL,
+            MoEActivation.GELU_TANH_NO_MUL,
+            MoEActivation.RELU2_NO_MUL,
         )
 
     @staticmethod

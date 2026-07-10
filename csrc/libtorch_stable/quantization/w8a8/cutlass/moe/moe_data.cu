@@ -140,7 +140,7 @@ template <bool SWAP_AB>
 __global__ void compute_problem_sizes_from_expert_offsets(
     const int64_t* __restrict__ expert_first_token_offset,
     int32_t* __restrict__ problem_sizes1, int32_t* __restrict__ problem_sizes2,
-    const int num_experts, const int n, const int k) {
+    const int num_experts, const int n, const int k, const bool is_gated) {
   int const expert_id = blockIdx.x * blockDim.x + threadIdx.x;
   if (expert_id >= num_experts) {
     return;
@@ -152,11 +152,12 @@ __global__ void compute_problem_sizes_from_expert_offsets(
 
   int32_t* ps1 = problem_sizes1 + expert_id * 3;
   int32_t* ps2 = problem_sizes2 + expert_id * 3;
+  int const n1 = is_gated ? 2 * n : n;
 
   if constexpr (!SWAP_AB) {
-    // [M, 2*N, K]
+    // [M, N1, K]
     ps1[0] = m;
-    ps1[1] = 2 * n;
+    ps1[1] = n1;
     ps1[2] = k;
     // [M, K, N]
     ps2[0] = m;
@@ -164,8 +165,8 @@ __global__ void compute_problem_sizes_from_expert_offsets(
     ps2[2] = n;
   } else {
     // swap logical M/N in the problem shape
-    // [2*N, M, K]
-    ps1[0] = 2 * n;
+    // [N1, M, K]
+    ps1[0] = n1;
     ps1[1] = m;
     ps1[2] = k;
     // [K, M, N]
@@ -179,7 +180,7 @@ void get_cutlass_moe_mm_problem_sizes_from_expert_offsets_caller(
     const torch::stable::Tensor& expert_first_token_offset,
     torch::stable::Tensor& problem_sizes1,
     torch::stable::Tensor& problem_sizes2, const int64_t n, const int64_t k,
-    const bool swap_ab) {
+    const bool swap_ab, const bool is_gated) {
   STD_TORCH_CHECK(expert_first_token_offset.is_cuda(),
                   "expert_first_token_offset must be a CUDA tensor");
   STD_TORCH_CHECK(expert_first_token_offset.scalar_type() ==
@@ -227,8 +228,8 @@ void get_cutlass_moe_mm_problem_sizes_from_expert_offsets_caller(
   VLLM_STABLE_DISPATCH_BOOL(swap_ab, SwapAB, [&] {
     compute_problem_sizes_from_expert_offsets<SwapAB>
         <<<blocks, threads, 0, stream>>>(offsets_ptr, ps1_ptr, ps2_ptr,
-                                         num_experts, static_cast<int>(n),
-                                         static_cast<int>(k));
+                                          num_experts, static_cast<int>(n),
+                                          static_cast<int>(k), is_gated);
   });
 }
 

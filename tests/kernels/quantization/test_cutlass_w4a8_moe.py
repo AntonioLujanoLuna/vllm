@@ -11,6 +11,10 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+    CutlassExpertsW4A8Fp8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_rows,
     quantize_weights,
@@ -22,6 +26,81 @@ from vllm.utils.torch_utils import set_random_seed
 IS_SUPPORTED_BY_GPU = (
     current_platform.is_cuda() and current_platform.get_device_capability()[0] >= 9
 )
+
+
+@pytest.mark.skipif(
+    not IS_SUPPORTED_BY_GPU,
+    reason="W4A8 Grouped GEMM is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("swap_ab", [False, True])
+@pytest.mark.parametrize("is_gated", [False, True])
+def test_cutlass_moe_problem_sizes_from_expert_offsets(swap_ab, is_gated):
+    expert_offsets = torch.tensor([0, 2, 5, 5], dtype=torch.int64, device="cuda")
+    problem_sizes1 = torch.empty((3, 3), dtype=torch.int32, device="cuda")
+    problem_sizes2 = torch.empty_like(problem_sizes1)
+    intermediate_size = 1280
+    hidden_size = 1024
+
+    ops.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        intermediate_size,
+        hidden_size,
+        swap_ab,
+        is_gated,
+    )
+
+    first_n = 2 * intermediate_size if is_gated else intermediate_size
+    token_counts = torch.tensor([2, 3, 0], dtype=torch.int32, device="cuda")
+    if swap_ab:
+        expected1 = torch.stack(
+            (
+                torch.full_like(token_counts, first_n),
+                token_counts,
+                torch.full_like(token_counts, hidden_size),
+            ),
+            dim=1,
+        )
+        expected2 = torch.stack(
+            (
+                torch.full_like(token_counts, hidden_size),
+                token_counts,
+                torch.full_like(token_counts, intermediate_size),
+            ),
+            dim=1,
+        )
+    else:
+        expected1 = torch.stack(
+            (
+                token_counts,
+                torch.full_like(token_counts, first_n),
+                torch.full_like(token_counts, hidden_size),
+            ),
+            dim=1,
+        )
+        expected2 = torch.stack(
+            (
+                token_counts,
+                torch.full_like(token_counts, hidden_size),
+                torch.full_like(token_counts, intermediate_size),
+            ),
+            dim=1,
+        )
+
+    torch.testing.assert_close(problem_sizes1, expected1)
+    torch.testing.assert_close(problem_sizes2, expected2)
+
+
+def test_cutlass_w4a8_moe_supports_non_gated_activations():
+    assert CutlassExpertsW4A8Fp8._supports_no_act_and_mul()
+    for activation in (
+        MoEActivation.SILU_NO_MUL,
+        MoEActivation.GELU_NO_MUL,
+        MoEActivation.GELU_TANH_NO_MUL,
+        MoEActivation.RELU2_NO_MUL,
+    ):
+        assert CutlassExpertsW4A8Fp8._supports_activation(activation)
 
 
 def to_fp8(tensor: torch.Tensor) -> torch.Tensor:

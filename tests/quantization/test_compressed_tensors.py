@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -932,6 +933,65 @@ def test_wna16_marlin_moe_w2_scale_sharding(actorder, group_size, part, full, ex
         actorder, group_size, part, full
     )
     assert result == expected
+
+
+@pytest.mark.parametrize("is_gated", [False, True])
+def test_w4a8_moe_first_projection_allocation(is_gated):
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a8_fp8 import (  # noqa: E501
+        CompressedTensorsW4A8Fp8MoEMethod,
+    )
+
+    method = CompressedTensorsW4A8Fp8MoEMethod.__new__(
+        CompressedTensorsW4A8Fp8MoEMethod
+    )
+    method.moe = SimpleNamespace(is_act_and_mul=is_gated)
+    method.group_size = 128
+    method.packed_factor = 8
+    layer = torch.nn.Module()
+
+    method.create_weights(
+        layer,
+        num_experts=8,
+        hidden_size=1024,
+        intermediate_size_per_partition=1280,
+        params_dtype=torch.bfloat16,
+    )
+
+    first_proj_size = 2560 if is_gated else 1280
+    assert layer.w13_weight_packed.shape == (8, first_proj_size, 128)
+    assert layer.w13_weight_scale.shape == (8, first_proj_size, 8)
+    assert layer.w13_weight_chan_scale.shape == (8, first_proj_size)
+    assert layer.w2_weight_packed.shape == (8, 1024, 160)
+
+
+@pytest.mark.parametrize("is_gated", [False, True])
+def test_compressed_tensors_moe_scheme_lookup_respects_activation(
+    is_gated, monkeypatch
+):
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+        compressed_tensors_moe as moe_module,
+    )
+
+    requested_names = []
+
+    class QuantConfig:
+        def _add_fused_moe_to_target_scheme_map(self):
+            pass
+
+        def get_scheme_dict(self, layer, name):
+            requested_names.append(name)
+            return None
+
+    monkeypatch.setattr(moe_module, "UnquantizedFusedMoEMethod", lambda _: object())
+    layer = SimpleNamespace(moe_config=SimpleNamespace(is_act_and_mul=is_gated))
+    moe_module.CompressedTensorsMoEMethod.get_moe_method(
+        QuantConfig(), layer, "experts"
+    )
+
+    expected_projection_names = [".0.up_proj", ".0.down_proj"]
+    if is_gated:
+        expected_projection_names.insert(0, ".0.gate_proj")
+    assert requested_names == ["experts" + name for name in expected_projection_names]
 
 
 @pytest.mark.skipif(

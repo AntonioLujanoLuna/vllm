@@ -163,7 +163,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "    Tensor expert_first_token_offset, "
       "    Tensor! problem_sizes1, "
       "    Tensor! problem_sizes2, "
-      "    int n, int k, bool swap_ab) -> ()");
+      "    int n, int k, bool swap_ab, bool is_gated) -> ()");
 
   // A function that computes data required to run fused MoE with w8a8 grouped
   // GEMM in batched expert format. It takes expert_num_tokens

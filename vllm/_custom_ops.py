@@ -904,6 +904,7 @@ def get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
     n: int,
     k: int,
     swap_ab: bool,
+    is_gated: bool,
 ):
     """Compute per-expert (M, N, K) problem sizes from expert_first_token_offset"""
     return torch.ops._C.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
@@ -913,6 +914,7 @@ def get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
         n,
         k,
         swap_ab,
+        is_gated,
     )
 
 

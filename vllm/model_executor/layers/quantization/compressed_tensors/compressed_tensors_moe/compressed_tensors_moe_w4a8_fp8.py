@@ -74,12 +74,15 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         )
         # storage type, pack 8xint4 into int32
         params_dtype = torch.int32
+        first_proj_size = intermediate_size_per_partition * (
+            2 if self.moe.is_act_and_mul else 1
+        )
 
         # WEIGHTS
         w13_weight_packed = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                first_proj_size,
                 hidden_size // self.packed_factor,
                 dtype=params_dtype,
             ),
@@ -107,7 +110,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         w13_weight_scale = torch.nn.Parameter(
             torch.ones(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                first_proj_size,
                 hidden_size // self.group_size,
                 dtype=layer.orig_dtype,
             ),
@@ -147,7 +150,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         w13_weight_chan_scale = torch.nn.Parameter(
             torch.ones(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                first_proj_size,
                 dtype=torch.float32,
             ),
             requires_grad=False,
